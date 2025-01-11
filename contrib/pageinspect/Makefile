@@ -25,7 +25,7 @@ PGFILEDESC = "pageinspect - functions to inspect contents of database pages"
 REGRESS = page btree brin gin gist hash checksum oldextversions
 
 ifdef USE_PGXS
-PG_CONFIG = pg_config
+PG_CONFIG = /usr/local/pgsql-17/bin/pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 else
