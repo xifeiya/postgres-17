@@ -80,6 +80,25 @@
 #include "utils/timestamp.h"
 #include "utils/varlena.h"
 
+#include "access/heapam.h"
+#include "access/htup_details.h"
+#include "catalog/pg_type.h"
+#include "utils/rel.h"
+#include "utils/snapmgr.h"
+//#include "utils/tqual.h"
+#include <stdio.h>
+#include <errno.h>
+#include "executor/tuptable.h"
+#include "access/table.h"
+#include "utils/builtins.h"
+#include "nodes/makefuncs.h"
+#include "catalog/namespace.h"
+#include "catalog/pg_namespace.h"
+#include "utils/syscache.h" 
+
+
+#include <dlfcn.h> // 动态加载库
+#include <string.h> // 字符串操作
 /* ----------------
  *		global variables
  * ----------------
@@ -1030,6 +1049,153 @@ exec_simple_query(const char *query_string)
 	bool		use_implicit_block;
 	char		msec_str[32];
 
+
+	if (strcmp(query_string, "select * from lineitem;") == 0) {
+        printf("using bitmap query\n");
+		FILE *file = fopen("/home/postgres/output.txt", "a");  // 打开文件用于追加
+		if (file == NULL) {
+			// 错误处理，无法打开文件
+			const char *err_str = strerror(errno);
+			elog(INFO, "Error opening file: %s", err_str);
+			return;
+		}
+		// 启动一个事务
+        StartTransactionCommand();
+
+        // 确保在事务上下文中执行代码
+        Assert(IsTransactionState());
+		// 设置快照
+        PushActiveSnapshot(GetTransactionSnapshot());
+
+        // 通过表名获取 relid
+        Oid namespace_oid = get_namespace_oid("public", false);
+        Oid relid = get_relname_relid("lineitem", namespace_oid);
+        if (!OidIsValid(relid)) {
+            elog(INFO, "找不到表: %s", "lineitem");
+            fclose(file);
+            // 结束事务
+            AbortCurrentTransaction();
+            return;
+        }
+
+		// 打开表
+		Relation rel = relation_open(relid, AccessShareLock);
+		if (rel == NULL) {
+			fprintf(file, "Failed to open table\n");
+			fclose(file);
+			AbortCurrentTransaction();
+			return;
+		}
+		Snapshot snapshot = GetActiveSnapshot();
+		// 定义要读取的 TID 列表
+		ItemPointerData tids[] = {
+			{ .ip_blkid = { .bi_hi = 0, .bi_lo = 1 }, .ip_posid = 1 },
+			{ .ip_blkid = { .bi_hi = 0, .bi_lo = 2 }, .ip_posid = 1 },
+			{ .ip_blkid = { .bi_hi = 0, .bi_lo = 3 }, .ip_posid = 1 }
+		};
+		int num_tids = sizeof(tids) / sizeof(tids[0]);
+
+		TupleDesc tupdesc = RelationGetDescr(rel);
+		// 写入列名称
+        for (int j = 0; j < tupdesc->natts; j++) {
+            Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
+            fprintf(file, "%s\t", NameStr(attr->attname));
+        }
+        fprintf(file, "\n");
+		// 读取每个 TID 的数据
+    	for (int i = 0; i < num_tids; i++) {
+			TupleTableSlot *slot = table_slot_create(rel, NULL);
+			HeapTuple tuple=NULL;
+			if (table_tuple_fetch_row_version(rel, &tids[i], snapshot, slot)) {
+				tuple = ExecFetchSlotHeapTuple(slot, true, NULL);
+				
+				for (int j = 1; j <= tupdesc->natts; j++) {
+					bool isnull;
+					Datum val = heap_getattr(tuple, j, tupdesc, &isnull);
+					if (!isnull) {
+						Oid atttypid = TupleDescAttr(tupdesc, j - 1)->atttypid; // 获取属性类型 OID
+						char *val_str = NULL;
+						// 通用方法：自动获取输出函数
+						Oid output_func_oid;
+						bool is_varlena;
+						getTypeOutputInfo(atttypid, &output_func_oid, &is_varlena);
+						val_str = OidOutputFunctionCall(output_func_oid, val);
+
+						/*
+						switch (atttypid) {
+							case TEXTOID:
+							case VARCHAROID:
+							case BPCHAROID: // text, varchar, bpchar 都可以用 TextDatumGetCString
+								val_str = TextDatumGetCString(val);
+								break;
+
+							case INT4OID: // int4 类型
+								val_str = psprintf("%d", DatumGetInt32(val));
+								break;
+							case INT8OID: // int8 类型
+								val_str = psprintf("%ld", DatumGetInt64(val));
+								break;
+							case FLOAT8OID: // float8 类型
+								val_str = psprintf("%f", DatumGetFloat8(val));
+								break;
+
+							case BOOLOID: // boolean 类型
+								val_str = DatumGetBool(val) ? "true" : "false";
+								break;
+
+							default: // 其他类型，尝试使用通用方法
+								val_str = OidOutputFunctionCall(atttypid, val);
+								break;
+						}
+						*/
+						//char *val_str = TextDatumGetCString(val);
+						fprintf(file, "%s\t", val_str);
+					} else {
+						fprintf(file, "NULL\t");
+					}
+				}
+				fprintf(file, "\n");
+			} else {
+				fprintf(file, "Failed to fetch tuple for TID (%u, %u)\n", tids[i].ip_blkid.bi_hi, tids[i].ip_blkid.bi_lo);
+			}
+			ExecDropSingleTupleTableSlot(slot);
+
+        	heap_freetuple(tuple);
+    	}
+		// 关闭表
+    	table_close(rel, AccessShareLock);
+
+		fprintf(file, "%s\n", "using bitmap query\n");  // 将信息写入文件
+		fclose(file);  // 关闭文件
+		// 弹出快照
+        PopActiveSnapshot();
+		// 提交事务
+        CommitTransactionCommand();
+
+		/*
+        // 动态加载C++库
+        void *handle = dlopen("/home/wang/Desktop/CUBIT/postgres-17/src/cubit_query/my_cpp_lib.so", RTLD_LAZY);
+        if (!handle) {
+            fprintf(stderr, "Failed to load library: %s\n", dlerror());
+            return;
+        }
+
+        // 获取C++函数指针
+        void (*hello_from_cpp)() = (void (*)())dlsym(handle, "hello_from_cpp");
+        if (!hello_from_cpp) {
+            fprintf(stderr, "Failed to find symbol: %s\n", dlerror());
+            dlclose(handle);
+            return;
+        }
+
+        // 调用C++函数
+        hello_from_cpp();
+
+        // 关闭库
+        dlclose(handle);
+		*/
+        return;
+    }
 	/*
 	 * Report query to various monitoring facilities.
 	 */

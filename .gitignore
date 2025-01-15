@@ -31,7 +31,8 @@ win32ver.rc
 *.exe
 lib*dll.def
 lib*.pc
-
+bm_15000000_*/*.bm
+bm_15000000_*
 # Local excludes in root directory
 /GNUmakefile
 /config.cache

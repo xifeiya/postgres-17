@@ -33,3 +33,23 @@ WHERE
 
 
 SELECT * FROM heap_page_items(get_raw_page('region', 0));
+
+
+
+./configure --prefix=/usr/local/pgsql --enable-debug --enable-cassert CFLAGS="-ggdb -O0 -g3 -Wall -fno-omit-frame-pointer -fstack-protector-strong"
+
+./configure
+make
+su
+make install
+adduser postgres
+mkdir -p /usr/local/pgsql/data
+chown postgres /usr/local/pgsql/data
+su - postgres
+/usr/local/pgsql/bin/initdb -D /usr/local/pgsql/data
+/usr/local/pgsql/bin/pg_ctl -D /usr/local/pgsql/data -l logfile start
+/usr/local/pgsql/bin/createdb test
+/usr/local/pgsql/bin/psql test -U postgres
+
+
+/usr/local/pgsql/bin/psql -h localhost -U postgres -d test -c "\COPY region FROM 'region.tbl' DELIMITER '|' CSV"
